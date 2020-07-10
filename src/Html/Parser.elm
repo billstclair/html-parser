@@ -1,6 +1,8 @@
 module Html.Parser exposing
     ( run, Node(..), Attribute
     , node, nodeToString
+    , nodeWithIsVoid, nodeToStringWithIsVoid
+    , isVoidElement
     )
 
 {-| Parse HTML 5 in Elm.
@@ -17,6 +19,14 @@ you need to parse HTML... This section is for you!
 [elm-parser]: https://package.elm-lang.org/packages/elm/parser/latest
 
 @docs node, nodeToString
+
+
+# Customization
+
+If you need to customize the default list of void node names, use these.
+
+@docs nodeWithIsVoid, nodeToStringWithIsVoid
+@docs isVoidElement
 
 -}
 
@@ -74,10 +84,25 @@ You can use this in your own parser to add support for HTML 5.
 -}
 node : Parser Node
 node =
+    nodeWithIsVoid isVoidElement
+
+
+{-| Parse an HTML node, customizing which element names may be void.
+
+    node =
+        nodeWithIsVoid isVoidElement
+
+To allow any element to be void:
+
+    nodeWithIsVoid (\_ -> True)
+
+-}
+nodeWithIsVoid : (String -> Bool) -> Parser Node
+nodeWithIsVoid isVoid =
     Parser.oneOf
         [ text
         , comment
-        , element
+        , element isVoid
         ]
 
 
@@ -94,7 +119,21 @@ Produces `<a href="https://elm-lang.org">Elm</a>`.
 
 -}
 nodeToString : Node -> String
-nodeToString node_ =
+nodeToString =
+    nodeToStringWithIsVoid isVoidElement
+
+
+{-| Same as `nodeToString`, but allows you to customize the void elements.
+
+    nodeToString =
+        nodeToStringWithIsVoid isVoidElement
+
+If you parse with `nodeWithIsVoid`, you should use the same predicate
+(or `(\_ -> True)`) to turn the `Node` back into a `String`.
+
+-}
+nodeToStringWithIsVoid : (String -> Bool) -> Node -> String
+nodeToStringWithIsVoid isVoid node_ =
     let
         attributeToString ( attr, value ) =
             attr ++ "=\"" ++ value ++ "\""
@@ -113,7 +152,7 @@ nodeToString node_ =
                         _ ->
                             " " ++ String.join " " (List.map attributeToString attributes)
             in
-            if isVoidElement name then
+            if isVoid name then
                 String.concat
                     [ "<"
                     , name
@@ -196,8 +235,8 @@ numericCharacterReference =
 -- Element
 
 
-element : Parser Node
-element =
+element : (String -> Bool) -> Parser Node
+element isVoid =
     Parser.succeed Tuple.pair
         |. Parser.chompIf ((==) '<')
         |= tagName
@@ -205,7 +244,7 @@ element =
         |= tagAttributes
         |> Parser.andThen
             (\( name, attributes ) ->
-                if isVoidElement name then
+                if isVoid name then
                     Parser.succeed (Element name attributes [])
                         |. Parser.oneOf
                             [ Parser.chompIf ((==) '/')
@@ -337,6 +376,8 @@ comment =
 -- Void elements
 
 
+{-| True if the arg names an HTML element that requires no closing tag.
+-}
 isVoidElement : String -> Bool
 isVoidElement name =
     List.member name voidElements
