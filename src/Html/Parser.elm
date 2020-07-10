@@ -1,8 +1,9 @@
 module Html.Parser exposing
     ( run, Node(..), Attribute
     , node, nodeToString
-    , nodeWithIsVoid, nodeToStringWithIsVoid
-    , isVoidElement
+    , Voidness(..)
+    , runWithIsVoid, nodeWithIsVoid, nodeToStringWithIsVoid
+    , isVoidElement, isLooselyVoidElement
     )
 
 {-| Parse HTML 5 in Elm.
@@ -25,8 +26,9 @@ you need to parse HTML... This section is for you!
 
 If you need to customize the default list of void node names, use these.
 
-@docs nodeWithIsVoid, nodeToStringWithIsVoid
-@docs isVoidElement
+@docs Voidness
+@docs runWithIsVoid, nodeWithIsVoid, nodeToStringWithIsVoid
+@docs isVoidElement, isLooselyVoidElement
 
 -}
 
@@ -43,12 +45,23 @@ import Parser exposing ((|.), (|=), Parser)
 
 -}
 run : String -> Result (List Parser.DeadEnd) (List Node)
-run str =
+run =
+    runWithIsVoid isVoidElement
+
+
+{-| Run the parser, customizing which elements may be void.
+
+    run =
+        runWithIsVoid isVoidElement
+
+-}
+runWithIsVoid : (String -> Voidness) -> String -> Result (List Parser.DeadEnd) (List Node)
+runWithIsVoid isVoid str =
     if String.isEmpty str then
         Ok []
 
     else
-        Parser.run (oneOrMore "node" node) str
+        Parser.run (oneOrMore "node" <| nodeWithIsVoid isVoid) str
 
 
 
@@ -97,7 +110,7 @@ To allow any element to be void:
     nodeWithIsVoid (\_ -> True)
 
 -}
-nodeWithIsVoid : (String -> Bool) -> Parser Node
+nodeWithIsVoid : (String -> Voidness) -> Parser Node
 nodeWithIsVoid isVoid =
     Parser.oneOf
         [ text
@@ -132,7 +145,7 @@ If you parse with `nodeWithIsVoid`, you should use the same predicate
 (or `(\_ -> True)`) to turn the `Node` back into a `String`.
 
 -}
-nodeToStringWithIsVoid : (String -> Bool) -> Node -> String
+nodeToStringWithIsVoid : (String -> Voidness) -> Node -> String
 nodeToStringWithIsVoid isVoid node_ =
     let
         attributeToString ( attr, value ) =
@@ -152,25 +165,35 @@ nodeToStringWithIsVoid isVoid node_ =
                         _ ->
                             " " ++ String.join " " (List.map attributeToString attributes)
             in
-            if isVoid name then
-                String.concat
-                    [ "<"
-                    , name
-                    , maybeAttributes
-                    , ">"
-                    ]
+            case isVoid name of
+                IsVoid ->
+                    String.concat
+                        [ "<"
+                        , name
+                        , maybeAttributes
+                        , ">"
+                        ]
 
-            else
-                String.concat
-                    [ "<"
-                    , name
-                    , maybeAttributes
-                    , ">"
-                    , String.join "" (List.map nodeToString children)
-                    , "</"
-                    , name
-                    , ">"
-                    ]
+                void ->
+                    if children == [] && void == MaybeVoid then
+                        String.concat
+                            [ "<"
+                            , name
+                            , maybeAttributes
+                            , "/>"
+                            ]
+
+                    else
+                        String.concat
+                            [ "<"
+                            , name
+                            , maybeAttributes
+                            , ">"
+                            , String.join "" (List.map nodeToString children)
+                            , "</"
+                            , name
+                            , ">"
+                            ]
 
         Comment comment_ ->
             "<!-- " ++ comment_ ++ " -->"
@@ -235,7 +258,7 @@ numericCharacterReference =
 -- Element
 
 
-element : (String -> Bool) -> Parser Node
+element : (String -> Voidness) -> Parser Node
 element isVoid =
     Parser.succeed Tuple.pair
         |. Parser.chompIf ((==) '<')
@@ -244,19 +267,30 @@ element isVoid =
         |= tagAttributes
         |> Parser.andThen
             (\( name, attributes ) ->
-                if isVoid name then
-                    Parser.succeed (Element name attributes [])
-                        |. Parser.oneOf
-                            [ Parser.chompIf ((==) '/')
-                            , Parser.succeed ()
-                            ]
-                        |. Parser.chompIf ((==) '>')
+                let
+                    whenVoid =
+                        Parser.succeed (Element name attributes [])
+                            |. Parser.oneOf
+                                [ Parser.chompIf ((==) '/')
+                                , Parser.succeed ()
+                                ]
+                            |. Parser.chompIf ((==) '>')
 
-                else
-                    Parser.succeed (Element name attributes)
-                        |. Parser.chompIf ((==) '>')
-                        |= many (Parser.backtrackable node)
-                        |. closingTag name
+                    whenNotVoid =
+                        Parser.succeed (Element name attributes)
+                            |. Parser.chompIf ((==) '>')
+                            |= many (Parser.backtrackable <| nodeWithIsVoid isVoid)
+                            |. closingTag name
+                in
+                case isVoid name of
+                    IsVoid ->
+                        whenVoid
+
+                    IsNotVoid ->
+                        whenNotVoid
+
+                    MaybeVoid ->
+                        Parser.oneOf [ whenNotVoid, whenVoid ]
             )
 
 
@@ -376,11 +410,49 @@ comment =
 -- Void elements
 
 
-{-| True if the arg names an HTML element that requires no closing tag.
+{-| Whether an element may have no closing tag.
+
+`IsVoid` means it may NEVER have a closing tag.
+`IsNotVoid` means it must ALWAYS have a closing tag.
+`MaybeVoid` means it can, but does not need to have a closing tag.
+
 -}
-isVoidElement : String -> Bool
+type Voidness
+    = IsVoid
+    | IsNotVoid
+    | MaybeVoid
+
+
+{-| Determine whether an element may have no closing tag.
+
+Always returns either `IsVoid` or `IsNotVoid`.
+
+Your custom isVoid function may also return `MaybeVoid`.
+
+-}
+isVoidElement : String -> Voidness
 isVoidElement name =
-    List.member name voidElements
+    if List.member name voidElements then
+        IsVoid
+
+    else
+        IsNotVoid
+
+
+{-| A common isVoid function for loose HTML parsing.
+
+Returns `IsVoid` when `isVoidElement` does.
+Otherwise returns `MaybeVoid`.
+
+-}
+isLooselyVoidElement : String -> Voidness
+isLooselyVoidElement name =
+    case isVoidElement name of
+        IsVoid ->
+            IsVoid
+
+        _ ->
+            MaybeVoid
 
 
 voidElements : List String
